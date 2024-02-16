@@ -1,0 +1,118 @@
+trigger: none
+pr: none
+
+variables:
+  - group: getport
+
+resources:
+  webhooks:
+    - webhook:  s3webhook 
+      connection:  s3webhook 
+
+stages:
+  - stage: fetch_port_access_token
+    displayName: fetch-port-access-token
+    jobs:
+    - job: fetch_port_access_token
+      displayName: fetch-port-access-token
+      pool:
+            vmImage: 'ubuntu-latest'
+      steps:
+        - script: |
+              sudo apt-get update
+              sudo apt-get install -y jq
+          displayName: Install jq
+        - script: |
+                  accessToken=$(curl -X POST \
+                  -H 'Content-Type: application/json' \
+                  -d '{"clientId": "$(PORT_CLIENT_ID)", "clientSecret": "$(PORT_CLIENT_SECRET)"}' \
+                  -s 'https://api.getport.io/v1/auth/access_token' | jq -r '.accessToken')
+                  echo "##vso[task.setvariable variable=accessToken;isOutput=true]$accessToken"
+                  echo "runId=${{ parameters.s3webhook.context.runId }}"
+          displayName: Fetch Access Token and Run ID
+          name: getToken
+
+  - stage: custom_Logic
+    displayName: custom-logic
+    dependsOn:
+      - fetch_port_access_token
+    jobs:
+      - job: custom_logic
+        displayName: custom-logic
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              echo "Insert custom logic here!"
+            displayName: 'Insert custom logic'
+
+  - stage: upsert_entity
+    displayName: upsert entity
+    dependsOn:
+      - fetch_port_access_token
+    jobs:
+      - job: upsert_entity
+        displayName: upsert entity
+        variables:
+          accessToken: $[ stageDependencies.fetch_port_access_token.fetch_port_access_token.outputs['getToken.accessToken'] ]
+          runId:  "${{ parameters.s3webhook.context.runId }}"
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+        - script: |
+            curl -X POST \
+               -H 'Content-Type: application/json' \
+               -H "Authorization: Bearer $(accessToken)" \
+               -d '{
+                    "identifier": "some_identifier",
+                    "title": "Some Title",
+                    "properties": {"name":"string"},
+                    "relations": {"aws_account":"related_entity_identifier"}
+                  }' \
+              "https://api.getport.io/v1/${{ parameters.s3webhook.context.blueprint }}/entities?upsert=true&run_id=$(runId)&create_missing_related_entities=true"
+
+          displayName: upsert entity
+
+  - stage: send_logs
+    displayName: send_logs
+    dependsOn:
+      - fetch_port_access_token
+      - create_entity
+    jobs:
+    - job: send_logs
+      variables:
+        accessToken: $[ stageDependencies.fetch_port_access_token.fetch_port_access_token.outputs['getToken.accessToken'] ]
+        runId:  "${{ parameters.testSecurity.context.runId }}"
+      displayName: send_logs
+      pool:
+        vmImage: 'ubuntu-latest'
+      steps:
+        - script: |
+            curl -X POST \
+              -H 'Content-Type: application/json' \
+              -H "Authorization: Bearer $(accessToken)" \
+              -d '{"message": "this is a log test message example"}' \
+              "https://api.getport.io/v1/actions/runs/$(runId)/logs"
+          displayName: Send Logs
+
+  - stage: update_run_status
+    displayName: Update Run Status
+    dependsOn:
+      - fetch_port_access_token
+      - create_entity
+    jobs:
+      - job: update_run_status
+        variables:
+          accessToken: $[ stageDependencies.fetch_port_access_token.fetch_port_access_token.outputs['getToken.accessToken'] ]
+          runId:  "${{ parameters.s3webhook.context.runId }}"
+        displayName: Update Run Status
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              curl -X PATCH \
+                -H 'Content-Type: application/json' \
+                -H "Authorization: Bearer $(accessToken)" \
+                -d '{"status":"SUCCESS", "message": {"run_status": "Azure CI/CD Run completed successfully!"}}' \
+                "https://api.getport.io/v1/actions/runs/$(runId)"
+            displayName: Update Run Status
